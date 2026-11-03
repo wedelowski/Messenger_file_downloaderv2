@@ -97,7 +97,18 @@ class OverlayService : Service() {
         setupOverlayViews()
         hideAllViews()
         handler.post(pollRunnable)
+        setupPersistentCapture()
         return START_STICKY
+    }
+
+    private fun setupPersistentCapture() {
+        val projection = mediaProjection ?: return
+        imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+        virtualDisplay = projection.createVirtualDisplay(
+            "OverlaySaverCapture", screenWidth, screenHeight, screenDensity,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+            imageReader!!.surface, null, handler
+        )
     }
 
     private fun dp(value: Int): Int = (value * screenDensity / 160f).toInt()
@@ -123,6 +134,17 @@ class OverlayService : Service() {
             ) {
                 lastKnownForegroundPackage = event.packageName
             }
+        }
+
+        try {
+            val stats = usageStatsManager.queryUsageStats(
+                UsageStatsManager.INTERVAL_BEST, now - 10_000, now
+            )
+            val mostRecent = stats?.maxByOrNull { it.lastTimeUsed }
+            if (mostRecent != null && now - mostRecent.lastTimeUsed < 4_000) {
+                lastKnownForegroundPackage = mostRecent.packageName
+            }
+        } catch (_: Exception) {
         }
 
         val shouldShow = lastKnownForegroundPackage in MESSENGER_PACKAGES
@@ -370,31 +392,20 @@ class OverlayService : Service() {
     }
 
     private fun captureScreen() {
-        val projection = mediaProjection
-        if (projection == null) {
+        if (imageReader == null || virtualDisplay == null) {
+            setupPersistentCapture()
             showFadeHint()
             return
         }
 
-        imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
-        virtualDisplay = projection.createVirtualDisplay(
-            "OverlaySaverCapture", screenWidth, screenHeight, screenDensity,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader!!.surface, null, handler
-        )
-
-        handler.postDelayed({
-            val image: Image? = imageReader?.acquireLatestImage()
-            if (image == null) {
-                showFadeHint()
-                cleanupCapture()
-                return@postDelayed
-            }
-            val bitmap = imageToBitmap(image)
-            image.close()
-            saveBitmap(bitmap)
-            cleanupCapture()
-        }, 200)
+        val image: Image? = imageReader?.acquireLatestImage()
+        if (image == null) {
+            showFadeHint()
+            return
+        }
+        val bitmap = imageToBitmap(image)
+        image.close()
+        saveBitmap(bitmap)
     }
 
     private fun imageToBitmap(image: Image): android.graphics.Bitmap {
