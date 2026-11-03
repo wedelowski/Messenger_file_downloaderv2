@@ -31,12 +31,8 @@ class OverlayService : Service() {
         const val EXTRA_RESULT_DATA = "result_data"
         const val CHANNEL_ID = "overlay_saver_channel"
         const val PREFS = "overlay_prefs"
-        const val KEY_X = "pos_x"
         const val KEY_Y = "pos_y"
 
-        // Regular Messenger and Messenger Lite. The "windowed version" the user means is
-        // this same app running in Android split-screen / freeform multi-window mode \u2014
-        // it still reports one of these as the focused package, so no extra handling needed.
         val MESSENGER_PACKAGES = setOf(
             "com.facebook.orca",
             "com.facebook.mlite"
@@ -63,6 +59,9 @@ class OverlayService : Service() {
     private var viewsVisible = false
     private lateinit var usageStatsManager: UsageStatsManager
 
+    private var lastKnownForegroundPackage: String? = null
+    private var lastPollTime: Long = 0L
+
     private val pollRunnable = object : Runnable {
         override fun run() {
             updateVisibilityForForegroundApp()
@@ -75,7 +74,7 @@ class OverlayService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(1, buildNotification())
 
-        val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, Activity_RESULT_CANCELED) ?: return START_NOT_STICKY
+        val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED) ?: return START_NOT_STICKY
         val resultData: Intent? = intent.getParcelableExtra(EXTRA_RESULT_DATA)
         if (resultData == null) {
             stopSelf()
@@ -93,34 +92,40 @@ class OverlayService : Service() {
         screenDensity = metrics.densityDpi
 
         usageStatsManager = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+        lastPollTime = System.currentTimeMillis() - 60_000
 
         setupOverlayViews()
-        hideAllViews() // start hidden; the poll loop reveals them only inside Messenger
+        hideAllViews()
         handler.post(pollRunnable)
         return START_STICKY
     }
 
-    /** Looks at recent usage events to find whichever app currently has foreground focus. */
-    private fun getForegroundPackage(): String? {
-        val end = System.currentTimeMillis()
-        val start = end - 10_000 // look back 10s, plenty to catch the latest switch
-        val events = usageStatsManager.queryEvents(start, end)
-        var lastPackage: String? = null
+    private fun dp(value: Int): Int = (value * screenDensity / 160f).toInt()
+
+    private fun roundedDrawable(colorInt: Int, radiusDp: Int): android.graphics.drawable.GradientDrawable {
+        return android.graphics.drawable.GradientDrawable().apply {
+            shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+            cornerRadius = dp(radiusDp).toFloat()
+            setColor(colorInt)
+        }
+    }
+
+    private fun updateVisibilityForForegroundApp() {
+        val now = System.currentTimeMillis()
+        val events = usageStatsManager.queryEvents(lastPollTime, now)
+        lastPollTime = now
+
         val event = UsageEvents.Event()
         while (events.hasNextEvent()) {
             events.getNextEvent(event)
             if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND ||
                 event.eventType == UsageEvents.Event.ACTIVITY_RESUMED
             ) {
-                lastPackage = event.packageName
+                lastKnownForegroundPackage = event.packageName
             }
         }
-        return lastPackage
-    }
 
-    private fun updateVisibilityForForegroundApp() {
-        val fg = getForegroundPackage()
-        val shouldShow = fg != null && fg in MESSENGER_PACKAGES
+        val shouldShow = lastKnownForegroundPackage in MESSENGER_PACKAGES
         if (shouldShow && !viewsVisible) {
             showAllViews()
         } else if (!shouldShow && viewsVisible) {
@@ -132,7 +137,6 @@ class OverlayService : Service() {
         viewsVisible = true
         saveButton.visibility = View.VISIBLE
         dotsButton.visibility = View.VISIBLE
-        // fadeText stays GONE until there's actually a hint to show
     }
 
     private fun hideAllViews() {
@@ -142,9 +146,6 @@ class OverlayService : Service() {
         fadeText.visibility = View.GONE
     }
 
-    // Workaround constant name clash avoidance
-    private val Activity_RESULT_CANCELED = Activity.RESULT_CANCELED
-
     private fun buildNotification(): Notification {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
@@ -153,15 +154,12 @@ class OverlayService : Service() {
             (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
                 .createNotificationChannel(channel)
         }
-        return NotificationCompatBuilder(this).build()
-    }
-
-    // Minimal notification builder without the androidx dependency conflicts
-    private fun NotificationCompatBuilder(context: Context) =
-        Notification.Builder(context, CHANNEL_ID)
+        return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("Overlay Saver running")
             .setContentText("Tap the floating button to save what's on screen.")
             .setSmallIcon(android.R.drawable.ic_menu_save)
+            .build()
+    }
 
     private fun setupOverlayViews() {
         val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -173,13 +171,14 @@ class OverlayService : Service() {
             else
                 @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
 
-        // --- Save button ---
         saveButton = TextView(this).apply {
-            text = "\u2B07"  // down arrow
-            textSize = 20f
+            text = "\u2B07"
+            textSize = 22f
+            gravity = Gravity.CENTER
             setTextColor(0xFFFFFFFF.toInt())
-            setBackgroundColor(0xFF0866FF.toInt())
-            setPadding(28, 20, 28, 20)
+            background = roundedDrawable(0xFF0866FF.toInt(), 18)
+            elevation = dp(4).toFloat()
+            setPadding(dp(20), dp(16), dp(20), dp(16))
         }
         saveParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -189,24 +188,20 @@ class OverlayService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.END
-            x = 8
+            x = dp(8)
             y = savedY
         }
         windowManager.addView(saveButton, saveParams)
-        makeDraggable(saveButton, saveParams) { newY ->
-            dotsParams.y = newY + 90
-            windowManager.updateViewLayout(dotsButton, dotsParams)
-            prefs.edit().putInt(KEY_Y, newY).apply()
-        }
         saveButton.setOnClickListener { onSaveTapped() }
 
-        // --- 3-dot menu button, anchored under the save button ---
         dotsButton = TextView(this).apply {
-            text = "\u22EE" // vertical ellipsis
+            text = "\u22EE"
             textSize = 18f
+            gravity = Gravity.CENTER
             setTextColor(0xFFFFFFFF.toInt())
-            setBackgroundColor(0x99000000.toInt())
-            setPadding(28, 12, 28, 12)
+            background = roundedDrawable(0xB3222222.toInt(), 14)
+            elevation = dp(3).toFloat()
+            setPadding(dp(20), dp(10), dp(20), dp(10))
         }
         dotsParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -216,19 +211,18 @@ class OverlayService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.END
-            x = 8
-            y = savedY + 90
+            x = dp(8)
+            y = savedY
         }
         windowManager.addView(dotsButton, dotsParams)
         dotsButton.setOnClickListener { showMenu() }
 
-        // --- Fade-out hint text ---
         fadeText = TextView(this).apply {
             text = "Select an image or video to download it"
             textSize = 13f
             setTextColor(0xFFFFFFFF.toInt())
-            setBackgroundColor(0xCC000000.toInt())
-            setPadding(20, 10, 20, 10)
+            background = roundedDrawable(0xCC000000.toInt(), 10)
+            setPadding(dp(14), dp(8), dp(14), dp(8))
             visibility = View.GONE
         }
         fadeParams = WindowManager.LayoutParams(
@@ -239,13 +233,32 @@ class OverlayService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.END
-            x = 16
-            y = savedY + 160
+            x = dp(16)
+            y = savedY
         }
         windowManager.addView(fadeText, fadeParams)
+
+        saveButton.post { relayoutStack(savedY, prefs) }
+        dotsButton.post { relayoutStack(savedY, prefs) }
+
+        makeDraggable(saveButton, saveParams) { newY ->
+            relayoutStack(newY, prefs)
+        }
     }
 
-    /** Drag-to-reposition vertically along the right edge. onMoved reports the new y. */
+    private fun relayoutStack(baseY: Int, prefs: android.content.SharedPreferences) {
+        if (saveButton.height == 0 || dotsButton.height == 0) return
+
+        saveParams.y = baseY
+        dotsParams.y = baseY + saveButton.height + dp(6)
+        fadeParams.y = dotsParams.y + dotsButton.height + dp(6)
+
+        windowManager.updateViewLayout(saveButton, saveParams)
+        windowManager.updateViewLayout(dotsButton, dotsParams)
+        windowManager.updateViewLayout(fadeText, fadeParams)
+        prefs.edit().putInt(KEY_Y, baseY).apply()
+    }
+
     private fun makeDraggable(
         view: View,
         params: WindowManager.LayoutParams,
@@ -265,7 +278,8 @@ class OverlayService : Service() {
                 MotionEvent.ACTION_MOVE -> {
                     val dy = (event.rawY - startY).toInt()
                     if (kotlin.math.abs(dy) > 12) moved = true
-                    params.y = (startParamY + dy).coerceIn(0, screenHeight - 100)
+                    val newY = (startParamY + dy).coerceIn(0, screenHeight - dp(200))
+                    params.y = newY
                     windowManager.updateViewLayout(view, params)
                     true
                 }
@@ -292,9 +306,9 @@ class OverlayService : Service() {
         popup.setOnMenuItemClickListener { item ->
             val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             when (item.title) {
-                "Move to top" -> setButtonY(80, prefs)
-                "Move to middle" -> setButtonY(screenHeight / 2 - 100, prefs)
-                "Move to bottom" -> setButtonY(screenHeight - 300, prefs)
+                "Move to top" -> relayoutStack(dp(60), prefs)
+                "Move to middle" -> relayoutStack(screenHeight / 2 - dp(80), prefs)
+                "Move to bottom" -> relayoutStack(screenHeight - dp(220), prefs)
                 "Save full screen now" -> captureScreen()
                 "Self-destruct (delete app)" -> confirmSelfDestructStep1()
             }
@@ -303,7 +317,6 @@ class OverlayService : Service() {
         popup.show()
     }
 
-    /** First of two confirmations before uninstalling. */
     private fun confirmSelfDestructStep1() {
         AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
             .setTitle("Delete Overlay Saver?")
@@ -319,7 +332,6 @@ class OverlayService : Service() {
             .show()
     }
 
-    /** Second, final confirmation. */
     private fun confirmSelfDestructStep2() {
         AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
             .setTitle("Are you sure?")
@@ -338,8 +350,6 @@ class OverlayService : Service() {
             @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
 
     private fun performSelfDestruct() {
-        // Android always shows its own system uninstall confirmation on top of this \u2014
-        // that's a third, OS-level check that can't be skipped, by design.
         val uninstallIntent = Intent(Intent.ACTION_DELETE).apply {
             data = android.net.Uri.parse("package:$packageName")
             flags = Intent.FLAG_ACTIVITY_NEW_TASK
@@ -348,21 +358,7 @@ class OverlayService : Service() {
         stopSelf()
     }
 
-    private fun setButtonY(y: Int, prefs: android.content.SharedPreferences) {
-        saveParams.y = y
-        dotsParams.y = y + 90
-        fadeParams.y = y + 160
-        windowManager.updateViewLayout(saveButton, saveParams)
-        windowManager.updateViewLayout(dotsButton, dotsParams)
-        windowManager.updateViewLayout(fadeText, fadeParams)
-        prefs.edit().putInt(KEY_Y, y).apply()
-    }
-
     private fun onSaveTapped() {
-        // This build can't detect which single on-screen element is "selected" without
-        // an Accessibility Service (a much more invasive permission). It captures what's
-        // currently visible on screen instead. If you open a photo/video full-screen first,
-        // that's effectively your "selection".
         captureScreen()
     }
 
@@ -380,10 +376,10 @@ class OverlayService : Service() {
             return
         }
 
-        imageReader = ImageReader.newInstance(screenWidth, screenHeight, android.graphics.PixelFormat.RGBA_8888, 2)
+        imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
         virtualDisplay = projection.createVirtualDisplay(
             "OverlaySaverCapture", screenWidth, screenHeight, screenDensity,
-            android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             imageReader!!.surface, null, handler
         )
 
