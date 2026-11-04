@@ -2,8 +2,6 @@ package com.overlaysaver.app
 
 import android.app.*
 import android.app.AlertDialog
-import android.app.usage.UsageEvents
-import android.app.usage.UsageStatsManager
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -57,10 +55,6 @@ class OverlayService : Service() {
 
     private val handler = Handler(Looper.getMainLooper())
     private var viewsVisible = false
-    private lateinit var usageStatsManager: UsageStatsManager
-
-    private var lastKnownForegroundPackage: String? = null
-    private var lastPollTime: Long = 0L
 
     private val pollRunnable = object : Runnable {
         override fun run() {
@@ -91,9 +85,6 @@ class OverlayService : Service() {
         screenHeight = metrics.heightPixels
         screenDensity = metrics.densityDpi
 
-        usageStatsManager = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
-        lastPollTime = System.currentTimeMillis() - 60_000
-
         setupOverlayViews()
         hideAllViews()
         handler.post(pollRunnable)
@@ -122,32 +113,8 @@ class OverlayService : Service() {
     }
 
     private fun updateVisibilityForForegroundApp() {
-        val now = System.currentTimeMillis()
-        val events = usageStatsManager.queryEvents(lastPollTime, now)
-        lastPollTime = now
-
-        val event = UsageEvents.Event()
-        while (events.hasNextEvent()) {
-            events.getNextEvent(event)
-            if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND ||
-                event.eventType == UsageEvents.Event.ACTIVITY_RESUMED
-            ) {
-                lastKnownForegroundPackage = event.packageName
-            }
-        }
-
-        try {
-            val stats = usageStatsManager.queryUsageStats(
-                UsageStatsManager.INTERVAL_BEST, now - 10_000, now
-            )
-            val mostRecent = stats?.maxByOrNull { it.lastTimeUsed }
-            if (mostRecent != null && now - mostRecent.lastTimeUsed < 4_000) {
-                lastKnownForegroundPackage = mostRecent.packageName
-            }
-        } catch (_: Exception) {
-        }
-
-        val shouldShow = lastKnownForegroundPackage in MESSENGER_PACKAGES
+        val fg = ForegroundAccessibilityService.currentForegroundPackage
+        val shouldShow = fg != null && fg in MESSENGER_PACKAGES
         if (shouldShow && !viewsVisible) {
             showAllViews()
         } else if (!shouldShow && viewsVisible) {
