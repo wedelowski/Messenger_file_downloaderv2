@@ -1,13 +1,12 @@
 package com.overlaysaver.app
 
 import android.app.Activity
-import android.app.AppOpsManager
 import android.content.Intent
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Bundle
-import android.os.Process
 import android.provider.Settings
+import android.text.TextUtils
 import android.widget.Button
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -22,7 +21,7 @@ class MainActivity : AppCompatActivity() {
             checkPermissionsAndProceed()
         }
 
-    private val usageAccessLauncher =
+    private val accessibilityLauncher =
         registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()) {
             checkPermissionsAndProceed()
         }
@@ -60,19 +59,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun hasUsageAccess(): Boolean {
-        val appOps = getSystemService(APP_OPS_SERVICE) as AppOpsManager
-        val mode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-            appOps.unsafeCheckOpNoThrow(
-                AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName
-            )
-        } else {
-            @Suppress("DEPRECATION")
-            appOps.checkOpNoThrow(
-                AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName
-            )
+    private fun hasAccessibilityPermission(): Boolean {
+        val expectedId = "$packageName/${ForegroundAccessibilityService::class.java.name}"
+        val enabledServices = Settings.Secure.getString(
+            contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+        ) ?: return false
+        val splitter = TextUtils.SimpleStringSplitter(':')
+        splitter.setString(enabledServices)
+        while (splitter.hasNext()) {
+            if (splitter.next().equals(expectedId, ignoreCase = true)) return true
         }
-        return mode == AppOpsManager.MODE_ALLOWED
+        return false
     }
 
     private fun checkPermissionsAndProceed() {
@@ -86,16 +83,16 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        if (!hasUsageAccess()) {
+        if (!hasAccessibilityPermission()) {
             statusText.text =
-                "Find \"Overlay Saver\" in the list and turn on Usage access \u2014 " +
-                "this is how the app can tell when Messenger is the one open, " +
-                "so the button only appears there. Then come back."
-            usageAccessLauncher.launch(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                "You'll land on a list of accessibility services \u2014 find \"Overlay Saver\" " +
+                "in the list, tap it, and turn it on. This is how the app knows the moment " +
+                "Messenger is open; it's set up to only ever see Messenger, nothing else. " +
+                "Then come back."
+            accessibilityLauncher.launch(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             return
         }
 
-        // Overlay + usage-access permissions are granted; now ask for screen-capture permission.
         screenCaptureLauncher.launch(projectionManager.createScreenCaptureIntent())
     }
 }
